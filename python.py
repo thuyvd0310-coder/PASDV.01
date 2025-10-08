@@ -3,6 +3,8 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+# Sửa lỗi: Import numpy_financial (npf) cho các hàm NPV/IRR
+import numpy_financial as npf 
 from google import genai
 from google.genai.errors import APIError
 
@@ -20,17 +22,16 @@ try:
     if API_KEY:
         GEMINI_CLIENT = genai.Client(api_key=API_KEY)
     else:
-        st.error("Lỗi: Không tìm thấy Khóa API 'GEMINI_API_KEY'. Vui lòng cấu hình Streamlit Secrets.")
+        # Nếu không có API Key trong secrets, thiết lập là None để báo lỗi khi gọi API
         GEMINI_CLIENT = None
-except Exception as e:
-    st.error(f"Lỗi khởi tạo Gemini Client: {e}")
+except Exception:
     GEMINI_CLIENT = None
 
 # --- Hàm gọi API Gemini (Cho AI Insights và Chatbot) ---
 def generate_ai_response(prompt_text):
     """Gửi prompt đến Gemini API và nhận nhận xét."""
     if GEMINI_CLIENT is None:
-        return "Lỗi: Gemini API không được cấu hình. Vui lòng kiểm tra API Key."
+        return "Lỗi: Gemini API không được cấu hình. Vui lòng kiểm tra API Key trong Streamlit Secrets."
     
     try:
         model_name = 'gemini-2.5-flash' 
@@ -46,6 +47,7 @@ def generate_ai_response(prompt_text):
         return f"Đã xảy ra lỗi không xác định: {e}"
 
 # --- Hàm tính toán Dòng tiền và Chỉ số DCF ---
+# Sử dụng npf.npv và npf.irr để khắc phục lỗi Attribute Error
 @st.cache_data
 def calculate_dcf(
     total_investment, 
@@ -57,24 +59,25 @@ def calculate_dcf(
 ):
     """Tính toán FCF, NPV và IRR."""
     
-    # Giả định đơn giản: Khấu hao = 0 để phù hợp với dữ liệu đầu vào (Lãi suất đã được xử lý trong WACC)
+    # Giả định đơn giản: Không tính Khấu hao (đã lược bỏ trong đề bài gốc)
     EBIT = annual_revenue - annual_cost
     TAX = EBIT * tax_rate
     EAT = EBIT - TAX
     
-    # FCF (Dòng tiền Tự do) = EAT + Khấu hao - Thay đổi NWC - Capex (Ở đây: FCF = EAT)
+    # FCF (Dòng tiền Tự do) = EAT (giả định)
     FCF_yearly = EAT
     
-    # Tạo Dòng tiền
+    # Tạo Dòng tiền: Đầu tư ban đầu (âm) + Dòng tiền dương qua các năm
     cash_flows = [-total_investment] + [FCF_yearly] * n_years
     
     # Tính NPV (Giá trị Hiện tại Thuần)
-    # np.npv(rate, values)
-    NPV = np.npv(wacc, cash_flows)
+    NPV = npf.npv(wacc, cash_flows) 
     
     # Tính IRR (Tỷ suất Sinh lời Nội tại)
-    # np.irr(values)
-    IRR = np.irr(cash_flows) if np.irr(cash_flows) != np.nan else 0
+    IRR = npf.irr(cash_flows) 
+    # Xử lý trường hợp IRR không tồn tại (NaN)
+    if np.isnan(IRR) or np.isinf(IRR):
+        IRR = 0.0
 
     return FCF_yearly, NPV, IRR, cash_flows
 
@@ -83,7 +86,8 @@ def calculate_dcf(
 # ----------------------------------------------------
 # MODULE 1: NHẬP LIỆU DỰ ÁN
 # ----------------------------------------------------
-with st.expander("📝 1. Nhập Liệu Dự Án và Thông số Tài chính", expanded=True):
+st.subheader("1. Nhập Liệu Dự Án và Thông số Tài chính")
+with st.container(border=True):
     col1, col2, col3 = st.columns(3)
     
     # Input Vốn
@@ -91,6 +95,7 @@ with st.expander("📝 1. Nhập Liệu Dự Án và Thông số Tài chính", e
     INV_DEBT_RATIO = col2.slider("Tỷ lệ Vay Vốn (%)", value=80, min_value=0, max_value=100) / 100
     LTV_TSBD = col3.number_input("Giá trị Tài sản Đảm bảo (tỷ VNĐ)", value=70.0, min_value=1.0, step=1.0)
 
+    st.markdown("---")
     col4, col5 = st.columns(2)
     # Input Tài chính
     WACC = col4.number_input("WACC của Doanh nghiệp (%)", value=13.0, min_value=1.0, step=0.1) / 100
@@ -107,26 +112,27 @@ with st.expander("📝 1. Nhập Liệu Dự Án và Thông số Tài chính", e
     VAY_VON = TOTAL_INV * INV_DEBT_RATIO
     VON_TU_CO = TOTAL_INV * (1 - INV_DEBT_RATIO)
 
-# --- Tính toán DCF ---
+# --- Tính toán DCF và Hiển thị Kết quả ---
 try:
     FCF, NPV, IRR, cash_flows_full = calculate_dcf(
         TOTAL_INV, N_YEARS, WACC, ANNUAL_REV, ANNUAL_COST, TAX_RATE
     )
     
     # ----------------------------------------------------
-    # MODULE 2: KẾT QUẢ VÀ CHỈ SỐ DCF
+    # MODULE 2 & 3: KẾT QUẢ, CHỈ SỐ DCF VÀ PHÂN TÍCH RỦI RO
     # ----------------------------------------------------
     st.header("📈 2. Hiệu quả Tài chính và Khả năng Trả nợ")
     
+    # Kết quả chính
     col_k1, col_k2, col_k3, col_k4 = st.columns(4)
     col_k1.metric("Vốn Vay Dự kiến", f"{VAY_VON:,.0f} tỷ VNĐ")
     col_k2.metric("Lợi nhuận Sau Thuế/năm (FCF)", f"{FCF:,.2f} tỷ VNĐ")
-    col_k3.metric("NPV (Giá trị Hiện tại Thuần)", f"{NPV:,.2f} tỷ VNĐ", delta="Đạt" if NPV > 0 else "Không đạt")
+    col_k3.metric("NPV (Giá trị Hiện tại Thuần)", f"{NPV:,.2f} tỷ VNĐ", delta="Đạt (NPV > 0)" if NPV > 0 else "Không đạt (NPV <= 0)")
     col_k4.metric("IRR (Tỷ suất Sinh lời)", f"{IRR*100:,.2f}%", delta="> WACC" if IRR > WACC else "< WACC")
     
-    # ----------------------------------------------------
-    # MODULE 3: PHÂN TÍCH ĐỘ NHẠY VÀ RỦI RO
-    # ----------------------------------------------------
+    st.markdown("---")
+
+    # Phân tích Độ nhạy
     st.subheader("Phân tích Độ nhạy (Kịch bản Xấu nhất)")
     
     # Kịch bản Xấu nhất: Doanh thu giảm 15%, Chi phí tăng 10%
@@ -138,15 +144,25 @@ try:
     )
     
     col_r1, col_r2 = st.columns(2)
-    col_r1.metric("NPV (Kịch bản Xấu nhất)", f"{NPV_W:,.2f} tỷ VNĐ", delta="Vẫn dương" if NPV_W > 0 else "Đã âm")
-    col_r2.metric("LTV (Cho vay/TSBĐ)", f"{(VAY_VON / LTV_TSBD) * 100:,.2f}%", delta="Rất an toàn")
+    col_r1.metric(
+        "NPV (Kịch bản Xấu nhất)", 
+        f"{NPV_W:,.2f} tỷ VNĐ", 
+        delta="Vẫn dương (An toàn)" if NPV_W > 0 else "Đã âm (Rủi ro cao)"
+    )
+    
+    LTV_RATIO = (VAY_VON / LTV_TSBD) * 100
+    col_r2.metric(
+        "LTV (Cho vay/TSBĐ)", 
+        f"{LTV_RATIO:,.2f}%", 
+        delta="Rất an toàn" if LTV_RATIO < 50 else "Cần xem xét"
+    )
 
     # ----------------------------------------------------
     # MODULE 4: AI INSIGHTS - NHẬN ĐỊNH CHUYÊN SÂU
     # ----------------------------------------------------
     st.header("🧠 3. AI Insights - Nhận định Chuyên sâu")
     
-    if st.button("Tạo Báo cáo Thẩm định AI"):
+    if st.button("Tạo Báo cáo Thẩm định AI (Click để phân tích)", use_container_width=True):
         
         # Tạo prompt chi tiết dựa trên các kết quả
         prompt_ai = f"""
@@ -159,7 +175,7 @@ try:
 
         Phân tích rủi ro (Kịch bản Xấu nhất - Doanh thu -15%, Chi phí +10%):
         - NPV Kịch bản Xấu nhất: {NPV_W:.2f} tỷ VNĐ
-        - LTV (Loan-to-Value): {(VAY_VON / LTV_TSBD) * 100:.2f}%
+        - LTV (Loan-to-Value): {LTV_RATIO:.2f}%
 
         Hãy đánh giá mức độ chấp nhận rủi ro và đưa ra kết luận về việc cấp vốn.
         """
@@ -188,7 +204,8 @@ try:
     )
 
     # 2. Hiển thị Lịch sử Hội thoại
-    chat_container = st.container()
+    # Đặt trong container để giữ vị trí cố định
+    chat_container = st.container(height=300, border=True)
     with chat_container:
         for message in st.session_state.chat_history:
             with st.chat_message(message["role"]):
@@ -202,17 +219,19 @@ try:
         else:
             # Lưu và hiển thị câu hỏi của người dùng
             st.session_state.chat_history.append({"role": "user", "content": prompt})
-            with st.chat_message("user"):
-                st.markdown(prompt)
+            with chat_container: # Sử dụng container để tin nhắn mới xuất hiện
+                with st.chat_message("user"):
+                    st.markdown(prompt)
 
             # Chuẩn bị bối cảnh (contextual prompt)
             context = f"Context Dự án: Tổng Vốn {TOTAL_INV} tỷ VNĐ, NPV: {NPV:.2f} tỷ VNĐ, IRR: {IRR*100:.2f}%. | "
             if uploaded_file is not None:
-                context += f"Người dùng đã tải tệp: {uploaded_file.name}. Vui lòng tham khảo bối cảnh này."
+                context += f"Người dùng đã tải tệp: {uploaded_file.name} để tham khảo. Vui lòng xem xét bối cảnh này."
             
             full_prompt = (
                 f"Bạn là chuyên gia thẩm định, hãy trả lời câu hỏi sau của người dùng, sử dụng bối cảnh dự án sau đây:\n\n"
                 f"{context}\n\n"
+                f"Lịch sử hội thoại (lược bớt): {st.session_state.chat_history[-4:]}\n"
                 f"Câu hỏi: {prompt}"
             )
             
@@ -220,11 +239,12 @@ try:
                 ai_response = generate_ai_response(full_prompt)
             
             # Lưu và hiển thị phản hồi của AI
-            with st.chat_message("assistant"):
-                st.markdown(ai_response)
+            with chat_container: # Sử dụng container để tin nhắn mới xuất hiện
+                with st.chat_message("assistant"):
+                    st.markdown(ai_response)
             st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
 
 except NameError:
-    st.error("Vui lòng kiểm tra lại các giá trị đầu vào.")
+    st.error("Lỗi: Vui lòng kiểm tra lại các giá trị đầu vào.")
 except Exception as e:
     st.error(f"Đã xảy ra lỗi không xác định trong quá trình tính toán: {e}")

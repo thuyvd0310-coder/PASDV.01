@@ -306,48 +306,112 @@ st.markdown(f"""
 st.info(verdict(base_npv, base_irr, wacc))
 
 # -----------------------------
-# 5. Xuat bao cao (TXT an toan)
 # -----------------------------
-st.subheader("5. Xuất báo cáo")
-def render_report_txt():
-    lines = []
-    lines.append("KET QUA THAM DINH DU AN - DCF PRO")
-    lines.append("="*50)
-    lines.append(f"Tong von dau tu: {fmt_money(total_invest)}")
-    lines.append(f"Ty le vay: {debt_ratio*100:,.2f}%  |  Gia tri TSBĐ: {fmt_money(collateral_value)}  |  LTV: {summaries[0]['LTV']*100:,.2f}%")
-    lines.append(f"WACC: {wacc*100:,.2f}%  |  Thue TNDN: {tax_rate*100:,.2f}%  |  Vong doi: {years} nam")
-    lines.append(f"Doanh thu N1: {fmt_money(rev_y1)}  |  Chi phi N1: {fmt_money(opex_y1)}")
-    lines.append(f"Tang truong Rev: {g_rev*100:,.2f}%  |  Tang truong Opex: {g_opex*100:,.2f}%")
-    lines.append(f"VLĐ ban dau: {fmt_money(wc0)}  |  Co so khau hao: {fmt_money(dep_base)}  |  Thanh ly cuoi ky: {salvage_pct*100:,.2f}%")
-    lines.append("")
+# 5. Xuất báo cáo chi tiết (DOCX + TXT)
+# -----------------------------
+from docx import Document
+from docx.shared import Pt
+from datetime import datetime
+
+st.subheader("5. Xuất báo cáo chi tiết")
+
+def create_docx_report():
+    doc = Document()
+    doc.add_heading("BÁO CÁO THẨM ĐỊNH DỰ ÁN ĐẦU TƯ (DCF PRO)", 0)
+
+    doc.add_paragraph(f"Ngày lập báo cáo: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+    doc.add_paragraph("")
+
+    # --- THÔNG TIN CHUNG ---
+    doc.add_heading("I. Thông tin chung về dự án", level=1)
+    info = doc.add_paragraph()
+    info.add_run("Tổng vốn đầu tư: ").bold = True
+    info.add_run(f"{fmt_money(total_invest)}\n")
+    info.add_run("Tỷ lệ vay vốn: ").bold = True
+    info.add_run(f"{debt_ratio*100:.2f}%  |  Giá trị tài sản đảm bảo: {fmt_money(collateral_value)}\n")
+    info.add_run("LTV (Vay/TSBĐ): ").bold = True
+    info.add_run(f"{summaries[0]['LTV']*100:.2f}%\n")
+    info.add_run("WACC: ").bold = True
+    info.add_run(f"{wacc*100:.2f}%  |  Thuế suất TNDN: {tax_rate*100:.2f}%  |  Vòng đời dự án: {years} năm\n")
+    info.add_run("Doanh thu năm đầu: ").bold = True
+    info.add_run(f"{fmt_money(rev_y1)}  |  Chi phí năm đầu: {fmt_money(opex_y1)}\n")
+    info.add_run("Tăng trưởng doanh thu: ").bold = True
+    info.add_run(f"{g_rev*100:.2f}%/năm  |  Tăng trưởng chi phí: {g_opex*100:.2f}%/năm\n")
+    info.add_run("Vốn lưu động ban đầu: ").bold = True
+    info.add_run(f"{fmt_money(wc0)}  |  Cơ sở khấu hao: {fmt_money(dep_base)}  |  Tỷ lệ thanh lý TSCĐ: {salvage_pct*100:.2f}%")
+
+    doc.add_paragraph("")
+
+    # --- KẾT QUẢ 3 KỊCH BẢN ---
+    doc.add_heading("II. Hiệu quả tài chính và độ nhạy (3 kịch bản)", level=1)
+    table = doc.add_table(rows=1, cols=5)
+    hdr_cells = table.rows[0].cells
+    hdr_cells[0].text = "Kịch bản"
+    hdr_cells[1].text = "NPV (tỷ VND)"
+    hdr_cells[2].text = "IRR (%)"
+    hdr_cells[3].text = "Thời gian hoàn vốn (năm)"
+    hdr_cells[4].text = "Ghi chú"
 
     for kq in summaries:
-        lines.append(f"[Kich ban: {kq['Kịch bản']}]")
-        lines.append(f"- NPV: {fmt_money(kq['NPV'])}")
-        irr_txt = "NaN" if pd.isna(kq["IRR"]) else f"{kq['IRR']*100:,.2f}%"
-        lines.append(f"- IRR: {irr_txt}")
-        pb_txt = "Khong hoan von" if pd.isna(kq["Payback (năm)"]) else f"{kq['Payback (năm)']:,.2f} nam"
-        lines.append(f"- Payback: {pb_txt}")
-        lines.append("")
-    lines.append("Ket luan tu dong (Kich ban co so): " + verdict(base_npv, base_irr, wacc))
-    return "\n".join(lines)
+        row_cells = table.add_row().cells
+        row_cells[0].text = kq["Kịch bản"]
+        row_cells[1].text = f"{kq['NPV']:.2f}"
+        row_cells[2].text = f"{kq['IRR']*100:.2f}" if not pd.isna(kq["IRR"]) else "NaN"
+        row_cells[3].text = f"{kq['Payback (năm)']:.2f}" if not pd.isna(kq["Payback (năm)"]) else "Không hoàn vốn"
+        row_cells[4].text = verdict(kq["NPV"], kq["IRR"], wacc)
 
-report_txt = render_report_txt()
+    doc.add_paragraph("")
+
+    # --- DÒNG TIỀN HÀNG NĂM ---
+    doc.add_heading("III. Dòng tiền hàng năm (kịch bản cơ sở)", level=1)
+    df_base = tables[0][1]
+    t = doc.add_table(rows=len(df_base)+1, cols=len(df_base.columns))
+    t.style = "Table Grid"
+
+    # Header
+    for j, col_name in enumerate(df_base.columns):
+        t.cell(0, j).text = col_name
+
+    # Body
+    for i, row in df_base.iterrows():
+        for j, col_name in enumerate(df_base.columns):
+            val = row[col_name]
+            if isinstance(val, (int, float)):
+                t.cell(i+1, j).text = f"{val:,.2f}"
+            else:
+                t.cell(i+1, j).text = str(val)
+
+    doc.add_paragraph("")
+
+    # --- KẾT LUẬN ---
+    doc.add_heading("IV. Kết luận và khuyến nghị", level=1)
+    doc.add_paragraph(f"Kết quả thẩm định cho thấy ở kịch bản cơ sở:")
+    doc.add_paragraph(f"• NPV: {fmt_money(base_npv)}")
+    doc.add_paragraph(f"• IRR: {(base_irr*100):.2f}% so với WACC {wacc*100:.2f}%")
+    doc.add_paragraph(f"• LTV: {summaries[0]['LTV']*100:.2f}%")
+    doc.add_paragraph("")
+    doc.add_paragraph(verdict(base_npv, base_irr, wacc))
+
+    # --- Lưu file ---
+    bio = BytesIO()
+    doc.save(bio)
+    bio.seek(0)
+    return bio
+
+
+# Nút tải DOCX
+docx_data = create_docx_report()
 st.download_button(
-    label="⬇️ Tải Báo cáo (TXT)",
-    data=report_txt.encode("utf-8"),
+    label="📄 Tải Báo cáo chi tiết (DOCX)",
+    data=docx_data,
+    file_name="Bao_cao_tham_dinh_DCF.docx",
+    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+)
+
+# Vẫn giữ nút tải TXT đơn giản (dành cho môi trường không hỗ trợ docx)
+st.download_button(
+    label="⬇️ Tải Báo cáo nhanh (TXT)",
+    data=render_report_txt().encode("utf-8"),
     file_name="Bao_cao_tham_dinh_DCF.txt",
     mime="text/plain",
 )
-
-st.caption("🔧 Ghi chú: Nếu môi trường của bạn có thư viện PDF/Word, bạn có thể mở rộng hàm xuất báo cáo để sinh PDF/DOCX.")
-
-# -----------------------------
-# (Tuy chon) Goi y mo rong PDF/Word
-# -----------------------------
-with st.expander("Hướng dẫn mở rộng xuất PDF/Word (tùy chọn)"):
-    st.markdown("""
-- **PDF**: Cài `reportlab` rồi tạo `SimpleDocTemplate` và `Paragraph` để sinh file PDF từ `report_txt` (hoặc render đẹp bằng bảng).  
-- **Word**: Cài `python-docx`, tạo tài liệu, thêm Heading/Paragraph, rồi `doc.save('Bao_cao.docx')`.  
-- Sau đó dùng `st.download_button` để cho phép tải file.
-""")

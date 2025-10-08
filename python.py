@@ -1,250 +1,353 @@
-# python.py
+# app.py
+# DCF Pro - Tham dinh du an dau tu (Tieng Viet) - 3 kich ban
+# Tac gia: ChatGPT (thiet ke cho Shelbi)
+# Yeu cau: streamlit, numpy, pandas, matplotlib (tich hop san trong Streamlit Cloud)
 
 import streamlit as st
-import pandas as pd
 import numpy as np
-# Sửa lỗi: Import numpy_financial (npf) cho các hàm NPV/IRR
-import numpy_financial as npf 
-from google import genai
-from google.genai.errors import APIError
+import pandas as pd
+from io import BytesIO
+import base64
+import math
 
-# --- Cấu hình Trang Streamlit ---
-st.set_page_config(
-    page_title="App Thẩm định Phương án Vốn Vay",
-    layout="wide"
-)
+st.set_page_config(page_title="Thẩm định Dự án Đầu tư (DCF Pro)", page_icon="💰", layout="wide")
+
+# -----------------------------
+# Helpers
+# -----------------------------
+def npv(rate, cashflows):
+    # cashflows: list, CF0 .. CFn
+    return sum(cf / ((1 + rate) ** t) for t, cf in enumerate(cashflows))
+
+def irr(cashflows, guess=0.1, max_iter=100, tol=1e-7):
+    # Newton-Raphson
+    rate = guess
+    for _ in range(max_iter):
+        # NPV
+        f = sum(cf / ((1 + rate) ** t) for t, cf in enumerate(cashflows))
+        # dNPV/dr
+        df = sum(-t * cf / ((1 + rate) ** (t + 1)) for t, cf in enumerate(cashflows))
+        if abs(df) < 1e-12:
+            break
+        new_rate = rate - f / df
+        if abs(new_rate - rate) < tol:
+            rate = new_rate
+            break
+        rate = new_rate
+    return rate if not (math.isnan(rate) or math.isinf(rate)) else np.nan
+
+def payback_period(cashflows):
+    # CF0 am. Tra ve nam + phan nam khi tong CF tich luy >= 0
+    cum = 0.0
+    for t, cf in enumerate(cashflows):
+        cum += cf
+        if cum >= 0:
+            if t == 0:
+                return 0.0
+            # noi suy tuyen tinh trong nam t
+            prev_cum = cum - cf
+            remain = -prev_cum
+            frac = remain / cf if cf != 0 else np.nan
+            return (t - 1) + frac
+    return np.nan  # khong hoan von
+
+def fmt_money(x, unit="tỷ VND"):
+    return f"{x:,.2f} {unit}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+def build_cashflow_table(
+    total_invest,
+    debt_ratio,
+    collateral_value,
+    wacc,
+    tax_rate,
+    years,
+    rev_y1,
+    opex_y1,
+    g_rev,
+    g_opex,
+    wc0,
+    dep_base,
+    salvage_pct,
+    scenario_name="Base",
+    booster_rev=0.0,
+    booster_opex=0.0,
+):
+    """
+    - dep_base: co so khau hao (ty VND) (vi du: TSCĐ = Tong đầu tu - VLĐ)
+    - salvage_pct: % gia tri thanh ly TSCĐ cuoi ky (0..1)
+    - booster_rev/opex: dieu chinh theo kich ban (vi du +0.15, -0.10)
+    """
+
+    # Khoi tao bang
+    years_idx = list(range(0, years + 1))  # 0..N
+    df = pd.DataFrame({"Năm": years_idx})
+
+    # Nam 0: giai doan dau tu
+    capex0 = dep_base  # gia su capex ~ co so khau hao
+    other_invest = total_invest - dep_base  # phan con lai (neu co)
+    # VLĐ ban đầu ghi nhận tách bạch
+    df["CAPEX"] = [capex0] + [0] * years
+    df["VLĐ (đầu kỳ)"] = [wc0] + [0] * years
+
+    # Doanh thu & Opex
+    rev = [0.0]
+    opex = [0.0]
+    for t in range(1, years + 1):
+        rt = rev_y1 * ((1 + g_rev) ** (t - 1))
+        ot = opex_y1 * ((1 + g_opex) ** (t - 1))
+        # booster theo kich ban
+        rt *= (1 + booster_rev)
+        ot *= (1 + booster_opex)
+        rev.append(rt)
+        opex.append(ot)
+    df["Doanh thu"] = rev
+    df["Chi phí HĐ"] = opex
+
+    # Khau hao tu dep_base theo duong thang
+    dep = [0.0] + [dep_base / years] * years
+    df["Khấu hao"] = dep
+
+    # EBIT = Rev - Opex - Dep
+    ebit = [rev[i] - opex[i] - dep[i] for i in range(years + 1)]
+    df["EBIT"] = ebit
+
+    # Thuế TNDN (chi theo tiền mặt) = max(EBIT, 0) * tax_rate
+    tax_cash = [max(e, 0) * tax_rate for e in ebit]
+    tax_cash[0] = 0.0
+    df["Thuế (tiền mặt)"] = tax_cash
+
+    # FCF = (EBIT - Thuế) + Khấu hao  (bo qua ΔVLĐ hàng năm để đơn giản)
+    fcf = [(ebit[i] - tax_cash[i]) + dep[i] for i in range(years + 1)]
+    # Nam 0: outflow capex + VLĐ
+    fcf[0] = -(capex0 + wc0 + other_invest)
+
+    # Cuoi ky: thu hoi VLĐ + thanh ly TSCĐ
+    salvage_value = dep_base * salvage_pct
+    fcf[-1] += salvage_value + wc0
+
+    df["FCF"] = fcf
+
+    # Tong hop chi so
+    cashflows = fcf
+    project_npv = npv(wacc, cashflows)
+    project_irr = irr(cashflows)
+    pp = payback_period(cashflows)
+    loan_amount = total_invest * debt_ratio
+    ltv = loan_amount / collateral_value if collateral_value > 0 else np.nan
+
+    kq = {
+        "Kịch bản": scenario_name,
+        "NPV": project_npv,
+        "IRR": project_irr,
+        "Payback (năm)": pp,
+        "Vay dự kiến": loan_amount,
+        "LTV": ltv,
+    }
+    return df, kq, cashflows
+
+
+# -----------------------------
+# Sidebar - Cau hinh kich ban
+# -----------------------------
+with st.sidebar:
+    st.header("⚙️ Cấu hình kịch bản")
+    sb_best_rev = st.slider("Tăng Doanh thu kịch bản Tốt (%)", 0, 50, 15) / 100
+    sb_best_opex = -st.slider("Giảm Chi phí kịch bản Tốt (%)", 0, 50, 10) / 100
+    sb_worst_rev = -st.slider("Giảm Doanh thu kịch bản Xấu (%)", 0, 50, 15) / 100
+    sb_worst_opex = st.slider("Tăng Chi phí kịch bản Xấu (%)", 0, 50, 10) / 100
 
 st.title("Ứng dụng Thẩm định Dự án Đầu tư (DCF) 💰")
+st.markdown("**Phiên bản DCF Pro – 3 kịch bản & báo cáo tự động**")
 
-# --- Khởi tạo và Cấu hình Gemini Client (Global) ---
-try:
-    API_KEY = st.secrets.get("GEMINI_API_KEY")
-    if API_KEY:
-        GEMINI_CLIENT = genai.Client(api_key=API_KEY)
+# -----------------------------
+# 1. Nhap lieu
+# -----------------------------
+st.subheader("1. Nhập Liệu Dự Án và Thông số tài chính")
+
+col1, col2, col3 = st.columns(3)
+with col1:
+    total_invest = st.number_input("Tổng Vốn Đầu tư (tỷ VND)", 0.0, 1e6, 30.0, step=0.5, format="%.2f")
+    debt_ratio = st.slider("Tỷ lệ Vay Vốn (%)", 0, 100, 80) / 100
+    wacc = st.number_input("WACC của Doanh nghiệp (%)", 0.0, 100.0, 13.0, step=0.25, format="%.2f") / 100
+
+with col2:
+    collateral_value = st.number_input("Giá trị Tài sản Đảm bảo (tỷ VND)", 0.0, 1e6, 70.0, step=0.5, format="%.2f")
+    tax_rate = st.number_input("Thuế suất TNDN (%)", 0.0, 100.0, 20.0, step=0.5, format="%.2f") / 100
+    years = st.number_input("Vòng đời Dự án (năm)", 1, 50, 10, step=1)
+
+with col3:
+    rev_y1 = st.number_input("Doanh thu Năm 1 (tỷ VND)", 0.0, 1e6, 3.50, step=0.1, format="%.2f")
+    opex_y1 = st.number_input("Chi phí Năm 1 (tỷ VND)", 0.0, 1e6, 2.00, step=0.1, format="%.2f")
+    g_rev = st.number_input("Tăng trưởng Doanh thu (%/năm)", -100.0, 200.0, 0.0, step=1.0, format="%.2f") / 100
+
+col4, col5, col6 = st.columns(3)
+with col4:
+    g_opex = st.number_input("Tăng trưởng Chi phí (%/năm)", -100.0, 200.0, 0.0, step=1.0, format="%.2f") / 100
+with col5:
+    wc0 = st.number_input("Vốn lưu động ban đầu (tỷ VND)", 0.0, 1e6, 3.00, step=0.5, format="%.2f")
+    salvage_pct = st.number_input("Tỷ lệ thanh lý TSCĐ cuối kỳ (%)", 0.0, 100.0, 10.0, step=1.0, format="%.2f") / 100
+with col6:
+    dep_base = st.number_input("Cơ sở Khấu hao (TSCĐ, tỷ VND)", 0.0, 1e6, max(0.0, total_invest - wc0), step=0.5, format="%.2f")
+
+st.markdown("---")
+
+# -----------------------------
+# 2. Tinh toan 3 kich ban
+# -----------------------------
+st.subheader("2. Hiệu quả Tài chính và Khả năng Trả nợ")
+
+scenarios = [
+    ("Cơ sở", 0.0, 0.0),
+    ("Tốt", sb_best_rev, sb_best_opex),
+    ("Xấu", sb_worst_rev, sb_worst_opex),
+]
+
+tables = []
+summaries = []
+cashflow_sets = {}
+
+for name, b_rev, b_op in scenarios:
+    df_cf, kq, cfs = build_cashflow_table(
+        total_invest=total_invest,
+        debt_ratio=debt_ratio,
+        collateral_value=collateral_value,
+        wacc=wacc,
+        tax_rate=tax_rate,
+        years=int(years),
+        rev_y1=rev_y1,
+        opex_y1=opex_y1,
+        g_rev=g_rev,
+        g_opex=g_opex,
+        wc0=wc0,
+        dep_base=dep_base,
+        salvage_pct=salvage_pct,
+        scenario_name=name,
+        booster_rev=b_rev,
+        booster_opex=b_op,
+    )
+    tables.append((name, df_cf))
+    summaries.append(kq)
+    cashflow_sets[name] = cfs
+
+summary_df = pd.DataFrame(summaries)
+# Hien thi cac chi so chinh
+mcol1, mcol2, mcol3, mcol4 = st.columns(4)
+with mcol1:
+    st.metric("Vốn Vay dự kiến", fmt_money(summary_df.loc[0, "Vay dự kiến"]))
+with mcol2:
+    st.metric("LTV (Vay/TSBĐ)", f"{summary_df.loc[0, 'LTV']*100:,.2f}%")
+with mcol3:
+    st.metric("NPV (Cơ sở)", fmt_money(summary_df.loc[0, "NPV"]))
+with mcol4:
+    irrv = summary_df.loc[0, "IRR"]
+    st.metric("IRR (Cơ sở)", f"{(irrv*100 if not np.isnan(irrv) else float('nan')):,.2f}%")
+
+st.caption("💡 Lưu ý: IRR âm hoặc NaN có thể xuất hiện khi dòng tiền không đổi dấu theo kiểu dự án truyền thống.")
+
+st.dataframe(
+    summary_df.assign(
+        **{
+            "NPV": summary_df["NPV"].apply(lambda x: fmt_money(x)),
+            "IRR": summary_df["IRR"].apply(lambda x: f"{x*100:,.2f}%"
+                                           if not (pd.isna(x) or np.isnan(x)) else "NaN"),
+            "Payback (năm)": summary_df["Payback (năm)"].apply(
+                lambda x: f"{x:,.2f}" if not (pd.isna(x) or np.isnan(x)) else "Không hoàn vốn"
+            ),
+            "Vay dự kiến": summary_df["Vay dự kiến"].apply(lambda x: fmt_money(x)),
+            "LTV": summary_df["LTV"].apply(lambda x: f"{x*100:,.2f}%"),
+        }
+    )
+)
+
+# -----------------------------
+# 3. Bang dong tien & bieu do
+# -----------------------------
+st.subheader("3. Dòng tiền hàng năm")
+tabs = st.tabs([f"📊 {name}" for name, _ in tables])
+
+for i, (name, df_cf) in enumerate(tables):
+    with tabs[i]:
+        st.markdown(f"**Kịch bản: {name}**")
+        st.dataframe(df_cf.style.format({
+            "CAPEX": "{:,.2f}",
+            "VLĐ (đầu kỳ)": "{:,.2f}",
+            "Doanh thu": "{:,.2f}",
+            "Chi phí HĐ": "{:,.2f}",
+            "Khấu hao": "{:,.2f}",
+            "EBIT": "{:,.2f}",
+            "Thuế (tiền mặt)": "{:,.2f}",
+            "FCF": "{:,.2f}",
+        }))
+        st.line_chart(df_cf.set_index("Năm")["FCF"])
+
+# -----------------------------
+# 4. Ket luan tu dong
+# -----------------------------
+def verdict(npv_val, irr_val, wacc_val):
+    cond_good = (npv_val > 0) and (not np.isnan(irr_val)) and (irr_val > wacc_val)
+    cond_bad = (npv_val <= 0) and (np.isnan(irr_val) or irr_val < wacc_val)
+    if cond_good:
+        return "Hiệu quả tài chính tốt, **có thể xem xét cấp vốn** (NPV>0, IRR>WACC)."
+    elif cond_bad:
+        return "Không hiệu quả về tài chính, **không đề xuất cấp vốn** (NPV≤0 hoặc IRR≤WACC)."
     else:
-        # Nếu không có API Key trong secrets, thiết lập là None để báo lỗi khi gọi API
-        GEMINI_CLIENT = None
-except Exception:
-    GEMINI_CLIENT = None
+        return "Cần xem xét thêm (chỉ tiêu lẫn lộn hoặc biến động cao)."
 
-# --- Hàm gọi API Gemini (Cho AI Insights và Chatbot) ---
-def generate_ai_response(prompt_text):
-    """Gửi prompt đến Gemini API và nhận nhận xét."""
-    if GEMINI_CLIENT is None:
-        return "Lỗi: Gemini API không được cấu hình. Vui lòng kiểm tra API Key trong Streamlit Secrets."
-    
-    try:
-        model_name = 'gemini-2.5-flash' 
-        response = GEMINI_CLIENT.models.generate_content(
-            model=model_name,
-            contents=prompt_text
-        )
-        return response.text
+st.subheader("4. Kết luận của Hệ thống AI (tự động)")
+base_npv = summaries[0]["NPV"]; base_irr = summaries[0]["IRR"]
+st.markdown(f"""
+**Tóm tắt (Kịch bản Cơ sở):**  
+- NPV: `{fmt_money(base_npv)}`  
+- IRR: `{(base_irr*100):,.2f}%` so với WACC `{wacc*100:,.2f}%`  
+- LTV: `{summaries[0]["LTV"]*100:,.2f}%` trên tài sản đảm bảo  
+- Payback: `{('Không hoàn vốn' if pd.isna(summaries[0]['Payback (năm)']) else f"{summaries[0]['Payback (năm)']:,.2f} năm")}`
+""")
 
-    except APIError as e:
-        return f"Lỗi gọi Gemini API: Vui lòng kiểm tra Khóa API hoặc giới hạn sử dụng. Chi tiết lỗi: {e}"
-    except Exception as e:
-        return f"Đã xảy ra lỗi không xác định: {e}"
+st.info(verdict(base_npv, base_irr, wacc))
 
-# --- Hàm tính toán Dòng tiền và Chỉ số DCF ---
-# Sử dụng npf.npv và npf.irr để khắc phục lỗi Attribute Error
-@st.cache_data
-def calculate_dcf(
-    total_investment, 
-    n_years, 
-    wacc, 
-    annual_revenue, 
-    annual_cost, 
-    tax_rate
-):
-    """Tính toán FCF, NPV và IRR."""
-    
-    # Giả định đơn giản: Không tính Khấu hao (đã lược bỏ trong đề bài gốc)
-    EBIT = annual_revenue - annual_cost
-    TAX = EBIT * tax_rate
-    EAT = EBIT - TAX
-    
-    # FCF (Dòng tiền Tự do) = EAT (giả định)
-    FCF_yearly = EAT
-    
-    # Tạo Dòng tiền: Đầu tư ban đầu (âm) + Dòng tiền dương qua các năm
-    cash_flows = [-total_investment] + [FCF_yearly] * n_years
-    
-    # Tính NPV (Giá trị Hiện tại Thuần)
-    NPV = npf.npv(wacc, cash_flows) 
-    
-    # Tính IRR (Tỷ suất Sinh lời Nội tại)
-    IRR = npf.irr(cash_flows) 
-    # Xử lý trường hợp IRR không tồn tại (NaN)
-    if np.isnan(IRR) or np.isinf(IRR):
-        IRR = 0.0
+# -----------------------------
+# 5. Xuat bao cao (TXT an toan)
+# -----------------------------
+st.subheader("5. Xuất báo cáo")
+def render_report_txt():
+    lines = []
+    lines.append("KET QUA THAM DINH DU AN - DCF PRO")
+    lines.append("="*50)
+    lines.append(f"Tong von dau tu: {fmt_money(total_invest)}")
+    lines.append(f"Ty le vay: {debt_ratio*100:,.2f}%  |  Gia tri TSBĐ: {fmt_money(collateral_value)}  |  LTV: {summaries[0]['LTV']*100:,.2f}%")
+    lines.append(f"WACC: {wacc*100:,.2f}%  |  Thue TNDN: {tax_rate*100:,.2f}%  |  Vong doi: {years} nam")
+    lines.append(f"Doanh thu N1: {fmt_money(rev_y1)}  |  Chi phi N1: {fmt_money(opex_y1)}")
+    lines.append(f"Tang truong Rev: {g_rev*100:,.2f}%  |  Tang truong Opex: {g_opex*100:,.2f}%")
+    lines.append(f"VLĐ ban dau: {fmt_money(wc0)}  |  Co so khau hao: {fmt_money(dep_base)}  |  Thanh ly cuoi ky: {salvage_pct*100:,.2f}%")
+    lines.append("")
 
-    return FCF_yearly, NPV, IRR, cash_flows
+    for kq in summaries:
+        lines.append(f"[Kich ban: {kq['Kịch bản']}]")
+        lines.append(f"- NPV: {fmt_money(kq['NPV'])}")
+        irr_txt = "NaN" if pd.isna(kq["IRR"]) else f"{kq['IRR']*100:,.2f}%"
+        lines.append(f"- IRR: {irr_txt}")
+        pb_txt = "Khong hoan von" if pd.isna(kq["Payback (năm)"]) else f"{kq['Payback (năm)']:,.2f} nam"
+        lines.append(f"- Payback: {pb_txt}")
+        lines.append("")
+    lines.append("Ket luan tu dong (Kich ban co so): " + verdict(base_npv, base_irr, wacc))
+    return "\n".join(lines)
 
-# --- Cấu hình Ứng dụng theo Module ---
+report_txt = render_report_txt()
+st.download_button(
+    label="⬇️ Tải Báo cáo (TXT)",
+    data=report_txt.encode("utf-8"),
+    file_name="Bao_cao_tham_dinh_DCF.txt",
+    mime="text/plain",
+)
 
-# ----------------------------------------------------
-# MODULE 1: NHẬP LIỆU DỰ ÁN
-# ----------------------------------------------------
-st.subheader("1. Nhập Liệu Dự Án và Thông số Tài chính")
-with st.container(border=True):
-    col1, col2, col3 = st.columns(3)
-    
-    # Input Vốn
-    TOTAL_INV = col1.number_input("Tổng Vốn Đầu tư (tỷ VNĐ)", value=30.0, min_value=1.0, step=1.0)
-    INV_DEBT_RATIO = col2.slider("Tỷ lệ Vay Vốn (%)", value=80, min_value=0, max_value=100) / 100
-    LTV_TSBD = col3.number_input("Giá trị Tài sản Đảm bảo (tỷ VNĐ)", value=70.0, min_value=1.0, step=1.0)
+st.caption("🔧 Ghi chú: Nếu môi trường của bạn có thư viện PDF/Word, bạn có thể mở rộng hàm xuất báo cáo để sinh PDF/DOCX.")
 
-    st.markdown("---")
-    col4, col5 = st.columns(2)
-    # Input Tài chính
-    WACC = col4.number_input("WACC của Doanh nghiệp (%)", value=13.0, min_value=1.0, step=0.1) / 100
-    TAX_RATE = col5.number_input("Thuế suất TNDN (%)", value=20.0, min_value=1.0, step=1.0) / 100
-    
-    # Input Dòng tiền
-    st.subheader("Dự kiến Dòng tiền Hoạt động Hàng năm")
-    col6, col7, col8 = st.columns(3)
-    ANNUAL_REV = col6.number_input("Doanh thu Hàng năm (tỷ VNĐ)", value=3.5, min_value=0.1, step=0.1)
-    ANNUAL_COST = col7.number_input("Chi phí Hàng năm (tỷ VNĐ)", value=2.0, min_value=0.1, step=0.1)
-    N_YEARS = col8.number_input("Vòng đời Dự án (năm)", value=10, min_value=1, step=1)
-    
-    # Tính toán cơ bản
-    VAY_VON = TOTAL_INV * INV_DEBT_RATIO
-    VON_TU_CO = TOTAL_INV * (1 - INV_DEBT_RATIO)
-
-# --- Tính toán DCF và Hiển thị Kết quả ---
-try:
-    FCF, NPV, IRR, cash_flows_full = calculate_dcf(
-        TOTAL_INV, N_YEARS, WACC, ANNUAL_REV, ANNUAL_COST, TAX_RATE
-    )
-    
-    # ----------------------------------------------------
-    # MODULE 2 & 3: KẾT QUẢ, CHỈ SỐ DCF VÀ PHÂN TÍCH RỦI RO
-    # ----------------------------------------------------
-    st.header("📈 2. Hiệu quả Tài chính và Khả năng Trả nợ")
-    
-    # Kết quả chính
-    col_k1, col_k2, col_k3, col_k4 = st.columns(4)
-    col_k1.metric("Vốn Vay Dự kiến", f"{VAY_VON:,.0f} tỷ VNĐ")
-    col_k2.metric("Lợi nhuận Sau Thuế/năm (FCF)", f"{FCF:,.2f} tỷ VNĐ")
-    col_k3.metric("NPV (Giá trị Hiện tại Thuần)", f"{NPV:,.2f} tỷ VNĐ", delta="Đạt (NPV > 0)" if NPV > 0 else "Không đạt (NPV <= 0)")
-    col_k4.metric("IRR (Tỷ suất Sinh lời)", f"{IRR*100:,.2f}%", delta="> WACC" if IRR > WACC else "< WACC")
-    
-    st.markdown("---")
-
-    # Phân tích Độ nhạy
-    st.subheader("Phân tích Độ nhạy (Kịch bản Xấu nhất)")
-    
-    # Kịch bản Xấu nhất: Doanh thu giảm 15%, Chi phí tăng 10%
-    DT_WORST = ANNUAL_REV * 0.85
-    CP_WORST = ANNUAL_COST * 1.10
-    
-    FCF_W, NPV_W, IRR_W, _ = calculate_dcf(
-        TOTAL_INV, N_YEARS, WACC, DT_WORST, CP_WORST, TAX_RATE
-    )
-    
-    col_r1, col_r2 = st.columns(2)
-    col_r1.metric(
-        "NPV (Kịch bản Xấu nhất)", 
-        f"{NPV_W:,.2f} tỷ VNĐ", 
-        delta="Vẫn dương (An toàn)" if NPV_W > 0 else "Đã âm (Rủi ro cao)"
-    )
-    
-    LTV_RATIO = (VAY_VON / LTV_TSBD) * 100
-    col_r2.metric(
-        "LTV (Cho vay/TSBĐ)", 
-        f"{LTV_RATIO:,.2f}%", 
-        delta="Rất an toàn" if LTV_RATIO < 50 else "Cần xem xét"
-    )
-
-    # ----------------------------------------------------
-    # MODULE 4: AI INSIGHTS - NHẬN ĐỊNH CHUYÊN SÂU
-    # ----------------------------------------------------
-    st.header("🧠 3. AI Insights - Nhận định Chuyên sâu")
-    
-    if st.button("Tạo Báo cáo Thẩm định AI (Click để phân tích)", use_container_width=True):
-        
-        # Tạo prompt chi tiết dựa trên các kết quả
-        prompt_ai = f"""
-        Bạn là một chuyên gia thẩm định tài chính cấp cao. Hãy đưa ra nhận định chuyên sâu (khoảng 4-5 đoạn) về phương án đầu tư dây chuyền bánh mì này. 
-        Tập trung vào 3 khía cạnh: Hiệu quả tài chính, Rủi ro (Độ nhạy), và Khả năng đảm bảo nợ cho ngân hàng.
-
-        Dữ liệu đầu vào:
-        - Tổng Vốn: {TOTAL_INV} tỷ VNĐ | Vốn Vay: {VAY_VON} tỷ VNĐ | WACC: {WACC*100}% | Thuế: {TAX_RATE*100}% | TSBĐ: {LTV_TSBD} tỷ VNĐ
-        - FCF Hàng năm: {FCF:.2f} tỷ VNĐ | NPV Cơ sở: {NPV:.2f} tỷ VNĐ | IRR Cơ sở: {IRR*100:.2f}%
-
-        Phân tích rủi ro (Kịch bản Xấu nhất - Doanh thu -15%, Chi phí +10%):
-        - NPV Kịch bản Xấu nhất: {NPV_W:.2f} tỷ VNĐ
-        - LTV (Loan-to-Value): {LTV_RATIO:.2f}%
-
-        Hãy đánh giá mức độ chấp nhận rủi ro và đưa ra kết luận về việc cấp vốn.
-        """
-        
-        with st.spinner('Đang gửi dữ liệu và chờ Gemini phân tích...'):
-            ai_result = generate_ai_response(prompt_ai)
-            st.markdown("**Kết quả Phân tích từ Gemini AI:**")
-            st.info(ai_result)
-
-    # ----------------------------------------------------
-    # MODULE 5: KHUNG HỎI - ĐÁP CHUYÊN GIA
-    # ----------------------------------------------------
-    st.header("💬 4. Hỏi - Đáp Chuyên gia với Gemini")
-    
-    # 1. Khởi tạo Lịch sử Hội thoại
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
-        if GEMINI_CLIENT:
-            st.session_state.chat_history.append({"role": "assistant", "content": "Xin chào! Tôi là chuyên gia thẩm định AI. Hãy hỏi tôi về tính toán NPV, IRR, hoặc các rủi ro của Phương án sử dụng vốn này."})
-
-    # Khung tải tệp (Chỉ để bổ sung bối cảnh)
-    uploaded_file = st.file_uploader(
-        "📎 Tải thêm tệp (PDF/Excel) để bổ sung bối cảnh phân tích:", 
-        type=["pdf", "xlsx", "csv"], 
-        key="chat_file_uploader"
-    )
-
-    # 2. Hiển thị Lịch sử Hội thoại
-    # Đặt trong container để giữ vị trí cố định
-    chat_container = st.container(height=300, border=True)
-    with chat_container:
-        for message in st.session_state.chat_history:
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
-
-    # 3. Xử lý Đầu vào (Input) của người dùng
-    if prompt := st.chat_input("Nhập câu hỏi của bạn về dự án này..."):
-        
-        if GEMINI_CLIENT is None:
-            st.error("Lỗi: Không thể khởi tạo Chatbot do thiếu Khóa API.")
-        else:
-            # Lưu và hiển thị câu hỏi của người dùng
-            st.session_state.chat_history.append({"role": "user", "content": prompt})
-            with chat_container: # Sử dụng container để tin nhắn mới xuất hiện
-                with st.chat_message("user"):
-                    st.markdown(prompt)
-
-            # Chuẩn bị bối cảnh (contextual prompt)
-            context = f"Context Dự án: Tổng Vốn {TOTAL_INV} tỷ VNĐ, NPV: {NPV:.2f} tỷ VNĐ, IRR: {IRR*100:.2f}%. | "
-            if uploaded_file is not None:
-                context += f"Người dùng đã tải tệp: {uploaded_file.name} để tham khảo. Vui lòng xem xét bối cảnh này."
-            
-            full_prompt = (
-                f"Bạn là chuyên gia thẩm định, hãy trả lời câu hỏi sau của người dùng, sử dụng bối cảnh dự án sau đây:\n\n"
-                f"{context}\n\n"
-                f"Lịch sử hội thoại (lược bớt): {st.session_state.chat_history[-4:]}\n"
-                f"Câu hỏi: {prompt}"
-            )
-            
-            with st.spinner("Gemini đang phân tích..."):
-                ai_response = generate_ai_response(full_prompt)
-            
-            # Lưu và hiển thị phản hồi của AI
-            with chat_container: # Sử dụng container để tin nhắn mới xuất hiện
-                with st.chat_message("assistant"):
-                    st.markdown(ai_response)
-            st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
-
-except NameError:
-    st.error("Lỗi: Vui lòng kiểm tra lại các giá trị đầu vào.")
-except Exception as e:
-    st.error(f"Đã xảy ra lỗi không xác định trong quá trình tính toán: {e}")
+# -----------------------------
+# (Tuy chon) Goi y mo rong PDF/Word
+# -----------------------------
+with st.expander("Hướng dẫn mở rộng xuất PDF/Word (tùy chọn)"):
+    st.markdown("""
+- **PDF**: Cài `reportlab` rồi tạo `SimpleDocTemplate` và `Paragraph` để sinh file PDF từ `report_txt` (hoặc render đẹp bằng bảng).  
+- **Word**: Cài `python-docx`, tạo tài liệu, thêm Heading/Paragraph, rồi `doc.save('Bao_cao.docx')`.  
+- Sau đó dùng `st.download_button` để cho phép tải file.
+""")

@@ -6,6 +6,9 @@ streamlit
 # Thư viện xử lý dữ liệu chính
 pandas
 
+# Thư viện tính toán khoa học (cần cho NPV, IRR)
+numpy
+
 # Thư viện cho chức năng AI (sử dụng Gemini API)
 google-genai
 

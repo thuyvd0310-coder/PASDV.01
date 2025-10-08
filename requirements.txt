@@ -1,17 +1,23 @@
-# Thư viện chính cho giao diện web
+# ------------------------------
+# CÁC THƯ VIỆN CHÍNH CHẠY APP DCF PRO
+# ------------------------------
+
+# Giao diện ứng dụng web
 streamlit
 
-# Thư viện xử lý dữ liệu và tính toán
+# Xử lý dữ liệu và tính toán
 pandas
 numpy
 matplotlib
 
-# Thư viện đọc/ghi file Excel (.xlsx)
+# Đọc / ghi file Excel
 openpyxl
 
-# Thư viện hỗ trợ định dạng bảng khi xuất báo cáo
+# Hiển thị bảng đẹp hơn khi xuất báo cáo
 tabulate
 
-# (Tuỳ chọn) Nếu bạn muốn xuất báo cáo PDF hoặc Word
-reportlab
+# Tạo báo cáo Word (.docx)
 python-docx
+
+# (Tùy chọn) Tạo báo cáo PDF nếu muốn mở rộng sau này
+reportlab

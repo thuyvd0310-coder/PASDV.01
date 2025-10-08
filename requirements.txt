@@ -6,8 +6,11 @@ streamlit
 # Thư viện xử lý dữ liệu chính
 pandas
 
-# Thư viện tính toán khoa học (cần cho NPV, IRR)
+# Thư viện tính toán khoa học (cần cho DCF)
 numpy
+
+# Thư viện chứa các hàm tài chính (NPV, IRR)
+numpy-financial 
 
 # Thư viện cho chức năng AI (sử dụng Gemini API)
 google-genai
@@ -15,5 +18,5 @@ google-genai
 # Thư viện cần thiết để pandas đọc và ghi file Excel (.xlsx)
 openpyxl
 
-# THÊM THƯ VIỆN NÀY ĐỂ GIẢI QUYẾT LỖI to_markdown()
+# Thư viện cần thiết cho pandas.to_markdown
 tabulate

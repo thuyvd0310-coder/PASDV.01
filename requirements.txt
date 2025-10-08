@@ -1,22 +1,17 @@
-# requirements.txt
-
-# Thư viện chính cho Streamlit
+# Thư viện chính cho giao diện web
 streamlit
 
-# Thư viện xử lý dữ liệu chính
+# Thư viện xử lý dữ liệu và tính toán
 pandas
-
-# Thư viện tính toán khoa học (cần cho DCF)
 numpy
+matplotlib
 
-# Thư viện chứa các hàm tài chính (NPV, IRR)
-numpy-financial 
-
-# Thư viện cho chức năng AI (sử dụng Gemini API)
-google-genai
-
-# Thư viện cần thiết để pandas đọc và ghi file Excel (.xlsx)
+# Thư viện đọc/ghi file Excel (.xlsx)
 openpyxl
 
-# Thư viện cần thiết cho pandas.to_markdown
+# Thư viện hỗ trợ định dạng bảng khi xuất báo cáo
 tabulate
+
+# (Tuỳ chọn) Nếu bạn muốn xuất báo cáo PDF hoặc Word
+reportlab
+python-docx

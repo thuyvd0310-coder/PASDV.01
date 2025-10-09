@@ -1,6 +1,6 @@
-# ------------------------------
-# CÁC THƯ VIỆN CHÍNH CHẠY APP DCF PRO
-# ------------------------------
+# ============================================
+# YÊU CẦU MÔI TRƯỜNG CHẠY APP DCF PRO (STREAMLIT)
+# ============================================
 
 # Giao diện ứng dụng web
 streamlit
@@ -8,16 +8,23 @@ streamlit
 # Xử lý dữ liệu và tính toán
 pandas
 numpy
+
+# Vẽ biểu đồ minh họa hoặc trực quan (nếu cần mở rộng)
 matplotlib
 
-# Đọc / ghi file Excel
+# Đọc / ghi file Excel (.xlsx)
 openpyxl
 
-# Hiển thị bảng đẹp hơn khi xuất báo cáo
+# Hiển thị bảng đẹp hơn khi xuất báo cáo text
 tabulate
 
 # Tạo báo cáo Word (.docx)
 python-docx
 
-# (Tùy chọn) Tạo báo cáo PDF nếu muốn mở rộng sau này
+# Hỗ trợ xuất báo cáo PDF (tuỳ chọn, nếu bạn mở rộng thêm chức năng)
 reportlab
+
+# Đảm bảo tương thích môi trường (một số server yêu cầu rõ phiên bản)
+# Nếu deploy trên Streamlit Cloud, không cần khai báo cụ thể, nhưng nếu dùng Render/Heroku:
+# Bạn có thể bổ sung (tuỳ chọn):
+# numpy-financial==1.0.0
